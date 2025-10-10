@@ -1,0 +1,185 @@
+---
+- name: Crea utente zookeeper
+  user:
+    name: zookeeper
+    system: yes
+    shell: /bin/bash
+    home: "{{ zookeeper_home }}"
+    create_home: no
+
+- name: Crea directory per Zookeeper
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: zookeeper
+    group: zookeeper
+    mode: '0755'
+  loop:
+    - "{{ zookeeper_home }}"
+    - "{{ zookeeper_data_dir }}"
+    - "{{ zookeeper_home }}/logs"
+
+- name: Verifica se Zookeeper è già installato
+  stat:
+    path: "{{ zookeeper_home }}/bin/zkServer.sh"
+  register: zk_installed
+
+- name: Scarica Zookeeper
+  get_url:
+    url: "{{ zookeeper_url }}"
+    dest: "/tmp/{{ zookeeper_archive }}"
+    timeout: 300
+  when: not zk_installed.stat.exists
+
+- name: Estrai Zookeeper
+  unarchive:
+    src: "/tmp/{{ zookeeper_archive }}"
+    dest: "{{ zookeeper_home }}"
+    remote_src: yes
+    extra_opts: ['--strip-components=1']
+    owner: zookeeper
+    group: zookeeper
+  when: not zk_installed.stat.exists
+
+- name: Verifica che zkServer.sh esista
+  stat:
+    path: "{{ zookeeper_home }}/bin/zkServer.sh"
+  register: zkserver_check
+
+- name: Fail se zkServer.sh non esiste
+  fail:
+    msg: "zkServer.sh non trovato in {{ zookeeper_home }}/bin/"
+  when: not zkserver_check.stat.exists
+
+- name: Rendi eseguibili gli script Zookeeper
+  file:
+    path: "{{ zookeeper_home }}/bin"
+    owner: zookeeper
+    group: zookeeper
+    mode: '0755'
+    recurse: yes
+
+- name: Configura myid per Zookeeper
+  template:
+    src: myid.j2
+    dest: "{{ zookeeper_data_dir }}/myid"
+    owner: zookeeper
+    group: zookeeper
+    mode: '0644'
+
+- name: Verifica contenuto myid
+  shell: cat {{ zookeeper_data_dir }}/myid
+  register: myid_content
+  changed_when: false
+
+- name: Mostra myid
+  debug:
+    msg: "MyID per {{ inventory_hostname }}: {{ myid_content.stdout }}"
+
+- name: Configura zoo.cfg
+  template:
+    src: zoo.cfg.j2
+    dest: "{{ zookeeper_home }}/conf/zoo.cfg"
+    owner: zookeeper
+    group: zookeeper
+    mode: '0644'
+  notify: restart zookeeper
+
+- name: Verifica zoo.cfg
+  shell: cat {{ zookeeper_home }}/conf/zoo.cfg
+  register: zoo_cfg_content
+  changed_when: false
+
+- name: Mostra zoo.cfg
+  debug:
+    var: zoo_cfg_content.stdout_lines
+
+- name: Crea java.env per Zookeeper
+  copy:
+    content: |
+      export JAVA_HOME={{ java_home }}
+      export PATH=$JAVA_HOME/bin:$PATH
+      export SERVER_JVMFLAGS="{{ zookeeper_heap_opts }}"
+    dest: "{{ zookeeper_home }}/conf/java.env"
+    owner: zookeeper
+    group: zookeeper
+    mode: '0644'
+
+- name: Crea file di log4j
+  copy:
+    content: |
+      zookeeper.root.logger=INFO, CONSOLE
+      zookeeper.console.threshold=INFO
+      zookeeper.tracelog.dir=.
+      zookeeper.tracelog.file=zookeeper_trace.log
+      log4j.rootLogger=${zookeeper.root.logger}
+      log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender
+      log4j.appender.CONSOLE.Threshold=${zookeeper.console.threshold}
+      log4j.appender.CONSOLE.layout=org.apache.log4j.PatternLayout
+      log4j.appender.CONSOLE.layout.ConversionPattern=%d{ISO8601} [myid:%X{myid}] - %-5p [%t:%C{1}@%L] - %m%n
+    dest: "{{ zookeeper_home }}/conf/log4j.properties"
+    owner: zookeeper
+    group: zookeeper
+    mode: '0644'
+
+- name: Verifica che Java funzioni per l'utente zookeeper
+  become_user: zookeeper
+  become: yes
+  shell: "{{ java_home }}/bin/java -version"
+  register: java_test
+  changed_when: false
+
+- name: Mostra output Java test
+  debug:
+    var: java_test.stderr_lines
+
+- name: Crea systemd service per Zookeeper
+  template:
+    src: zookeeper.service.j2
+    dest: /etc/systemd/system/zookeeper.service
+    mode: '0644'
+  notify: restart zookeeper
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+
+- name: Abilita Zookeeper
+  systemd:
+    name: zookeeper
+    enabled: yes
+
+- name: Avvia Zookeeper
+  systemd:
+    name: zookeeper
+    state: started
+  register: zk_start
+  ignore_errors: yes
+
+- name: Mostra errore Zookeeper se fallisce
+  debug:
+    msg: "Zookeeper non è partito. Controllare i log con: journalctl -xeu zookeeper.service"
+  when: zk_start is failed
+
+- name: Verifica log Zookeeper in caso di errore
+  shell: journalctl -xeu zookeeper.service -n 30 --no-pager
+  register: zk_logs
+  when: zk_start is failed
+  changed_when: false
+
+- name: Mostra log Zookeeper
+  debug:
+    var: zk_logs.stdout_lines
+  when: zk_start is failed
+
+- name: Fail se Zookeeper non parte
+  fail:
+    msg: "Zookeeper ha fallito l'avvio"
+  when: zk_start is failed
+
+- name: Attendi che Zookeeper sia pronto
+  wait_for:
+    port: "{{ zookeeper_client_port }}"
+    delay: 5
+    timeout: 60
+  when: zk_start is succeeded

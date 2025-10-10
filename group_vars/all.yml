@@ -1,0 +1,51 @@
+---
+# Versioni e URL
+java_version: "17.0.16"
+java_url: "https://cdn.azul.com/zulu/bin/zulu17.60.17-ca-jdk17.0.16-linux_x64.tar.gz"
+java_archive: "zulu17.60.17-ca-jdk17.0.16-linux_x64.tar.gz"
+
+zookeeper_version: "3.9.4"
+zookeeper_url: "https://archive.apache.org/dist/zookeeper/zookeeper-3.9.4/apache-zookeeper-3.9.4-bin.tar.gz"
+zookeeper_archive: "apache-zookeeper-3.9.4-bin.tar.gz"
+
+kafka_version: "3.9.1"
+kafka_scala_version: "2.13"
+kafka_url: "https://archive.apache.org/dist/kafka/3.9.1/kafka_2.13-3.9.1.tgz"
+kafka_archive: "kafka_2.13-3.9.1.tgz"
+
+# Directory di installazione
+install_base: "/opt"
+java_home: "{{ install_base }}/jdk17"
+zookeeper_home: "{{ install_base }}/zookeeper"
+kafka_home: "{{ install_base }}/kafka"
+
+# Directory dati
+zookeeper_data_dir: "/var/lib/zookeeper"
+kafka_log_dirs: "/var/lib/kafka-logs"
+
+# Porte
+zookeeper_client_port: 2181
+zookeeper_peer_port: 2888
+zookeeper_leader_port: 3888
+kafka_port: 9093
+kafka_plaintext_port: 9092
+
+# Configurazioni TLS
+ssl_enabled: true
+ssl_keystore_location: "{{ kafka_home }}/config/certs/kafka.server.keystore.jks"
+ssl_truststore_location: "{{ kafka_home }}/config/certs/kafka.server.truststore.jks"
+ssl_keystore_password: "changeit"
+ssl_truststore_password: "changeit"
+ssl_key_password: "changeit"
+
+# Parametri Kafka
+kafka_heap_opts: "-Xmx1G -Xms1G"
+kafka_num_partitions: 3
+kafka_replication_factor: 3
+kafka_min_insync_replicas: 2
+
+# Parametri Zookeeper
+zookeeper_heap_opts: "-Xmx512M -Xms512M"
+zookeeper_tick_time: 2000
+zookeeper_init_limit: 10
+zookeeper_sync_limit: 5

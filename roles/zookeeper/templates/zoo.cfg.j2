@@ -1,0 +1,24 @@
+# Configurazione base
+tickTime={{ zookeeper_tick_time }}
+initLimit={{ zookeeper_init_limit }}
+syncLimit={{ zookeeper_sync_limit }}
+
+# Directory dati
+dataDir={{ zookeeper_data_dir }}
+
+# Porta client
+clientPort={{ zookeeper_client_port }}
+
+# Configurazioni avanzate
+maxClientCnxns=60
+autopurge.snapRetainCount=3
+autopurge.purgeInterval=1
+
+# Configurazione cluster
+{% for host in groups['kafka_cluster'] %}
+server.{{ hostvars[host]['zookeeper_id'] }}={{ hostvars[host]['ansible_host'] }}:{{ zookeeper_peer_port }}:{{ zookeeper_leader_port }}
+{% endfor %}
+
+# Admin server
+admin.enableServer=true
+admin.serverPort=8080

@@ -1,0 +1,60 @@
+---
+- name: Setup Kafka + Zookeeper Cluster con TLS
+  hosts: kafka_cluster
+  become: yes
+  
+  tasks:
+    - name: Aggiorna cache APT (ignora errori repository)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      retries: 3
+      delay: 5
+      register: apt_update_result
+      until: apt_update_result is succeeded
+      ignore_errors: yes
+
+    - name: Installa dipendenze di sistema
+      apt:
+        name:
+          - wget
+          - curl
+          - tar
+          - net-tools
+          - vim
+          - openssl
+          - ca-certificates
+        state: present
+        update_cache: no
+
+    - name: Includi ruolo Java
+      include_role:
+        name: java
+
+    - name: Includi ruolo Zookeeper
+      include_role:
+        name: zookeeper
+
+    - name: Includi ruolo Kafka
+      include_role:
+        name: kafka
+
+    - name: Verifica stato finale Zookeeper
+      systemd:
+        name: zookeeper
+        state: started
+      register: zk_status
+
+    - name: Verifica stato finale Kafka
+      systemd:
+        name: kafka
+        state: started
+      register: kafka_status
+
+    - name: Mostra riepilogo installazione
+      debug:
+        msg: 
+          - "Nodo: {{ inventory_hostname }}"
+          - "Broker ID: {{ zookeeper_id }}"
+          - "Zookeeper: {{ zk_status.status.ActiveState }}"
+          - "Kafka: {{ kafka_status.status.ActiveState }}"

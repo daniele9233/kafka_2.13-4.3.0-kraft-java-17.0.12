@@ -1,0 +1,78 @@
+# Broker ID
+broker.id={{ kafka_broker_id }}
+
+# Listeners e advertised listeners
+listeners=PLAINTEXT://{{ ansible_host }}:{{ kafka_plaintext_port }},SSL://{{ ansible_host }}:{{ kafka_port }}
+advertised.listeners=PLAINTEXT://{{ ansible_host }}:{{ kafka_plaintext_port }},SSL://{{ ansible_host }}:{{ kafka_port }}
+
+# Configurazione TLS/SSL
+{% if ssl_enabled %}
+ssl.keystore.location={{ ssl_keystore_location }}
+ssl.keystore.password={{ ssl_keystore_password }}
+ssl.key.password={{ ssl_key_password }}
+ssl.truststore.location={{ ssl_truststore_location }}
+ssl.truststore.password={{ ssl_truststore_password }}
+ssl.client.auth=none
+ssl.endpoint.identification.algorithm=
+
+# Security inter-broker - usa PLAINTEXT per evitare problemi di autenticazione mutua
+security.inter.broker.protocol=PLAINTEXT
+{% else %}
+security.inter.broker.protocol=PLAINTEXT
+{% endif %}
+
+# Zookeeper
+zookeeper.connect={% for host in groups['kafka_cluster'] %}{{ hostvars[host]['ansible_host'] }}:{{ zookeeper_client_port }}{% if not loop.last %},{% endif %}{% endfor %}
+
+zookeeper.connection.timeout.ms=18000
+
+# Directory log
+log.dirs={{ kafka_log_dirs }}
+
+# Configurazioni partizioni e replicazione
+num.partitions={{ kafka_num_partitions }}
+default.replication.factor={{ kafka_replication_factor }}
+min.insync.replicas={{ kafka_min_insync_replicas }}
+offsets.topic.replication.factor={{ kafka_replication_factor }}
+transaction.state.log.replication.factor={{ kafka_replication_factor }}
+transaction.state.log.min.isr={{ kafka_min_insync_replicas }}
+
+# Configurazioni log retention
+log.retention.hours=168
+log.retention.check.interval.ms=300000
+log.segment.bytes=1073741824
+
+# Network threads
+num.network.threads=3
+num.io.threads=8
+
+# Socket settings
+socket.send.buffer.bytes=102400
+socket.receive.buffer.bytes=102400
+socket.request.max.bytes=104857600
+
+# Configurazioni gruppo consumatori
+group.initial.rebalance.delay.ms=3000
+
+# Configurazioni cluster
+auto.create.topics.enable=false
+delete.topic.enable=true
+
+# Configurazioni controller
+controller.socket.timeout.ms=30000
+
+# Configurazioni aggiuntive per stabilità
+replica.lag.time.max.ms=30000
+replica.socket.timeout.ms=30000
+replica.socket.receive.buffer.bytes=65536
+
+# Log cleanup
+log.cleaner.enable=true
+log.cleanup.policy=delete
+
+# Compression
+compression.type=producer
+
+# Message size limits
+message.max.bytes=1048576
+replica.fetch.max.bytes=1048576

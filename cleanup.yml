@@ -1,0 +1,71 @@
+---
+- name: Cleanup installazione precedente Kafka e Zookeeper
+  hosts: kafka_cluster
+  become: yes
+  
+  tasks:
+    - name: Ferma servizio Kafka
+      systemd:
+        name: kafka
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Ferma servizio Zookeeper
+      systemd:
+        name: zookeeper
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Rimuovi systemd services
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/kafka.service
+        - /etc/systemd/system/zookeeper.service
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Rimuovi directory installazioni
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/kafka
+        - /opt/zookeeper
+        - /opt/jdk17
+        - /var/lib/kafka-logs
+        - /var/lib/zookeeper
+        - /etc/profile.d/java.sh
+
+    - name: Rimuovi archivi temporanei
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/kafka_2.13-3.9.1.tgz
+        - /tmp/apache-zookeeper-3.9.4.tar.gz
+        - /tmp/apache-zookeeper-3.9.4-bin.tar.gz
+        - /tmp/zulu17.60.17-ca-jdk17.0.16-linux_x64.tar.gz
+
+    - name: Rimuovi utente kafka
+      user:
+        name: kafka
+        state: absent
+        remove: yes
+      ignore_errors: yes
+
+    - name: Rimuovi utente zookeeper
+      user:
+        name: zookeeper
+        state: absent
+        remove: yes
+      ignore_errors: yes
+
+    - name: Mostra messaggio di completamento
+      debug:
+        msg: "Cleanup completato su {{ inventory_hostname }}"

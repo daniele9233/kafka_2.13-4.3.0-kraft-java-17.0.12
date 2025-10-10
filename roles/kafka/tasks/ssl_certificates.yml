@@ -1,0 +1,164 @@
+---
+- name: Rimuovi vecchi certificati
+  file:
+    path: "{{ kafka_home }}/config/certs"
+    state: absent
+
+- name: Ricrea directory certificati
+  file:
+    path: "{{ kafka_home }}/config/certs"
+    state: directory
+    owner: kafka
+    group: kafka
+    mode: '0700'
+
+- name: Genera CA privata (solo sul primo nodo)
+  shell: |
+    openssl req -new -x509 -keyout ca-key -out ca-cert -days 3650 \
+      -subj "/C=IT/ST=Italy/L=Rome/O=Company/CN=KafkaCA" \
+      -passout pass:{{ ssl_keystore_password }}
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+    creates: "{{ kafka_home }}/config/certs/ca-cert"
+  when: inventory_hostname == groups['kafka_cluster'][0]
+  run_once: true
+
+- name: Fetch CA cert dal primo nodo
+  fetch:
+    src: "{{ kafka_home }}/config/certs/ca-cert"
+    dest: "/tmp/kafka-ca-cert"
+    flat: yes
+  when: inventory_hostname == groups['kafka_cluster'][0]
+  run_once: true
+
+- name: Fetch CA key dal primo nodo
+  fetch:
+    src: "{{ kafka_home }}/config/certs/ca-key"
+    dest: "/tmp/kafka-ca-key"
+    flat: yes
+  when: inventory_hostname == groups['kafka_cluster'][0]
+  run_once: true
+
+- name: Copia CA cert agli altri nodi
+  copy:
+    src: "/tmp/kafka-ca-cert"
+    dest: "{{ kafka_home }}/config/certs/ca-cert"
+    owner: kafka
+    group: kafka
+    mode: '0644'
+  when: inventory_hostname != groups['kafka_cluster'][0]
+
+- name: Copia CA key agli altri nodi
+  copy:
+    src: "/tmp/kafka-ca-key"
+    dest: "{{ kafka_home }}/config/certs/ca-key"
+    owner: kafka
+    group: kafka
+    mode: '0600'
+  when: inventory_hostname != groups['kafka_cluster'][0]
+
+- name: Crea file di estensioni SAN per ogni broker
+  copy:
+    content: |
+      [req]
+      distinguished_name = req_distinguished_name
+      x509_extensions = v3_req
+      prompt = no
+      
+      [req_distinguished_name]
+      C = IT
+      ST = Italy
+      L = Rome
+      O = Company
+      CN = {{ ansible_hostname }}
+      
+      [v3_req]
+      keyUsage = critical, digitalSignature, keyEncipherment, keyAgreement
+      extendedKeyUsage = serverAuth, clientAuth
+      subjectAltName = @alt_names
+      
+      [alt_names]
+      DNS.1 = {{ ansible_hostname }}
+      DNS.2 = {{ ansible_fqdn }}
+      DNS.3 = localhost
+      IP.1 = {{ ansible_host }}
+      IP.2 = 127.0.0.1
+    dest: "{{ kafka_home }}/config/certs/cert-ext.cnf"
+    owner: kafka
+    group: kafka
+    mode: '0644'
+
+- name: Genera keystore per ogni broker
+  shell: |
+    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias localhost -validity 3650 \
+      -genkey -keyalg RSA -keysize 2048 \
+      -dname "CN={{ ansible_hostname }},OU=IT,O=Company,L=Rome,ST=Italy,C=IT" \
+      -ext "SAN=DNS:{{ ansible_hostname }},DNS:{{ ansible_fqdn }},DNS:localhost,IP:{{ ansible_host }},IP:127.0.0.1" \
+      -storepass {{ ssl_keystore_password }} -keypass {{ ssl_key_password }}
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+    creates: "{{ kafka_home }}/config/certs/kafka.server.keystore.jks"
+
+- name: Crea truststore e importa CA
+  shell: |
+    {{ java_home }}/bin/keytool -keystore kafka.server.truststore.jks -alias CARoot -import -file ca-cert \
+      -storepass {{ ssl_truststore_password }} -noprompt
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+    creates: "{{ kafka_home }}/config/certs/kafka.server.truststore.jks"
+
+- name: Esporta certificato dal keystore
+  shell: |
+    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias localhost -certreq -file cert-file \
+      -storepass {{ ssl_keystore_password }} \
+      -ext "SAN=DNS:{{ ansible_hostname }},DNS:{{ ansible_fqdn }},DNS:localhost,IP:{{ ansible_host }},IP:127.0.0.1"
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+    creates: "{{ kafka_home }}/config/certs/cert-file"
+
+- name: Firma il certificato con la CA includendo SAN
+  shell: |
+    openssl x509 -req -CA ca-cert -CAkey ca-key -in cert-file -out cert-signed \
+      -days 3650 -CAcreateserial -passin pass:{{ ssl_keystore_password }} \
+      -extfile cert-ext.cnf -extensions v3_req
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+    creates: "{{ kafka_home }}/config/certs/cert-signed"
+
+- name: Importa CA nel keystore
+  shell: |
+    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias CARoot -import -file ca-cert \
+      -storepass {{ ssl_keystore_password }} -noprompt
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+  ignore_errors: yes
+
+- name: Importa certificato firmato nel keystore
+  shell: |
+    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias localhost -import -file cert-signed \
+      -storepass {{ ssl_keystore_password }} -noprompt
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+  ignore_errors: yes
+
+- name: Imposta permessi sui certificati
+  file:
+    path: "{{ kafka_home }}/config/certs"
+    owner: kafka
+    group: kafka
+    mode: '0700'
+    recurse: yes
+
+- name: Verifica SAN nei certificati
+  shell: |
+    {{ java_home }}/bin/keytool -list -v -keystore kafka.server.keystore.jks -storepass {{ ssl_keystore_password }} | grep -A 5 "SubjectAlternativeName"
+  args:
+    chdir: "{{ kafka_home }}/config/certs"
+  register: cert_san_info
+  changed_when: false
+
+- name: Mostra SAN nei certificati
+  debug:
+    msg: 
+      - "Certificato per: {{ ansible_hostname }}"
+      - "{{ cert_san_info.stdout_lines }}"
