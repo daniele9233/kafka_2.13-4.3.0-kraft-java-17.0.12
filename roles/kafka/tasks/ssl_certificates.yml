@@ -57,21 +57,23 @@
   shell: |
     set -e
     IP="{{ hostvars[item]['ansible_host'] }}"
-    HOST="{{ item }}"
     KS="kafka-${IP}.keystore.jks"
 
-    # 1. Genera keystore e chiave privata
+    # Rimuovi eventuali file parziali di esecuzioni precedenti fallite
+    rm -f "${KS}" "cert-file-${IP}" "cert-signed-${IP}" "ext-${IP}.cnf"
+
+    # 1. Genera keystore e chiave privata (SAN=IP:<ip> come da sez. 4.3 della guida)
     {{ java_home }}/bin/keytool -genkey -keystore "${KS}" -alias {{ ssl_keystore_alias }} \
       -validity {{ ssl_validity_days }} -keyalg RSA -keysize {{ ssl_keystore_key_size }} \
       -storepass '{{ ssl_keystore_password }}' -keypass '{{ ssl_key_password }}' \
-      -dname "CN=${IP}" -ext "SAN=IP:${IP},DNS:${HOST},DNS:localhost,IP:127.0.0.1"
+      -dname "CN=${IP}" -ext "SAN=IP:${IP}"
 
     # 2. Crea richiesta di firma (CSR)
     {{ java_home }}/bin/keytool -keystore "${KS}" -alias {{ ssl_keystore_alias }} \
       -certreq -file "cert-file-${IP}" -storepass '{{ ssl_keystore_password }}'
 
-    # 3. Firma il certificato con la CA includendo SAN=IP:<ip>
-    printf "subjectAltName=IP:%s,DNS:%s,DNS:localhost,IP:127.0.0.1\n" "${IP}" "${HOST}" > "ext-${IP}.cnf"
+    # 3. Firma il certificato con la CA includendo subjectAltName=IP:<ip>
+    printf "subjectAltName=IP:%s\n" "${IP}" > "ext-${IP}.cnf"
     openssl x509 -req -CA ca.crt -CAkey ca.key -in "cert-file-${IP}" \
       -out "cert-signed-${IP}" -days {{ ssl_validity_days }} -CAcreateserial \
       -extfile "ext-${IP}.cnf"
