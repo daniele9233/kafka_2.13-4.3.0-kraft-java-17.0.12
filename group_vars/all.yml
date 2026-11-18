@@ -106,9 +106,9 @@ ssl_validity_days: 3650
 ssl_keystore_alias: "localhost"
 ssl_ca_alias: "CARoot"
 
-ssl_keystore_password: "RASUNICOcoll.2026"
-ssl_key_password: "RASUNICOcoll.2026"
-ssl_truststore_password: "RASUNICOcoll.2026"
+ssl_keystore_password: "PTVonlinEproD.2026"
+ssl_key_password: "PTVonlinEproD.2026"
+ssl_truststore_password: "PTVonlinEproD.2026"
 
 ssl_truststore_filename: "kafka.truststore.jks"
 ssl_truststore_location: "{{ kafka_security_dir }}/{{ ssl_truststore_filename }}"
@@ -131,11 +131,11 @@ sasl_controller_mechanism: "PLAIN"
 
 # Utente superuser / inter-broker / controller
 kafka_admin_user: "admin"
-kafka_admin_password: "RASUNICOcoll.2026"
+kafka_admin_password: "PTVonlinEproD.2026"
 
 # Utente applicativo client
 kafka_app_user: "appclient"
-kafka_app_password: "RASUNICOcoll.2026"
+kafka_app_password: "PTVonlinEproD.2026"
 
 # Eventuali utenti SASL/PLAIN aggiuntivi (lista di dizionari: [{ username: "u1", password: "p1" }])
 kafka_additional_users: []
