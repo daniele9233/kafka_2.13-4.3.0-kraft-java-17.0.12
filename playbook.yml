@@ -45,6 +45,9 @@
         {{ kafka_home }}/bin/kafka-metadata-quorum.sh --bootstrap-server "$BS" \
           --command-config "{{ kafka_client_properties }}" describe --status
       register: kraft_quorum_status
+      retries: 6
+      delay: 5
+      until: kraft_quorum_status.rc == 0
       changed_when: false
       when: inventory_hostname == groups['kafka_cluster'][0]
       run_once: true

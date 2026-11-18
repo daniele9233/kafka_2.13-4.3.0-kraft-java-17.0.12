@@ -148,18 +148,7 @@
 
 - name: Imposta Cluster ID condiviso per tutti i nodi del cluster
   set_fact:
-    kafka_effective_cluster_id: >-
-      {{
-        kafka_cluster_id
-        if (kafka_cluster_id | length > 0)
-        else (
-          hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout
-          if (hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd is defined
-              and hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout is defined
-              and hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout | length > 0)
-          else hostvars[groups['kafka_cluster'][0]].generated_cluster_id_cmd.stdout
-        ) | trim
-      }}
+    kafka_effective_cluster_id: "{{ (kafka_cluster_id if (kafka_cluster_id | length > 0) else (hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout_lines[-1] if (hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd is defined and hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout_lines is defined and hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout_lines | length > 0) else hostvars[groups['kafka_cluster'][0]].generated_cluster_id_cmd.stdout_lines[-1])) | trim }}"
 
 - name: Mostra Cluster ID KRaft selezionato
   debug:
@@ -231,6 +220,10 @@
     name: kafka
     enabled: yes
     state: started
+  register: kafka_service_start
+
+- name: Applica eventuali riavvii pendenti prima di attendere le porte
+  meta: flush_handlers
 
 - name: Attendi che la porta CONTROLLER ({{ kafka_controller_port }}) sia in ascolto
   wait_for:
@@ -258,6 +251,7 @@
     JAVA_HOME: "{{ java_home }}"
     PATH: "{{ java_home }}/bin:{{ kafka_home }}/bin:/usr/local/bin:/usr/bin:/bin"
   shell: |
+    set -e
     BS="{% for host in groups['kafka_cluster'] %}{{ hostvars[host]['ansible_host'] }}:{{ kafka_broker_port }}{% if not loop.last %},{% endif %}{% endfor %}"
     CC="--command-config {{ kafka_client_properties }}"
 
@@ -277,6 +271,9 @@
     - inventory_hostname == groups['kafka_cluster'][0]
   run_once: true
   register: acl_init_result
+  retries: 6
+  delay: 5
+  until: acl_init_result.rc == 0
   changed_when: "'Adding ACLs' in acl_init_result.stdout"
 
 # ------------------------------------------------------------------------------

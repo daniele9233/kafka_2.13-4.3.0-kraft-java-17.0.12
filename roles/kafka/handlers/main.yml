@@ -4,3 +4,4 @@
     name: kafka
     state: restarted
     daemon_reload: yes
+  when: not (kafka_service_start.changed | default(false))
