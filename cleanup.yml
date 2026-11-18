@@ -64,6 +64,7 @@
         - /var/lib/kafka-logs
         - /var/lib/zookeeper
         - /etc/profile.d/java.sh
+        - /etc/logrotate.d/kafka
 
     - name: Rimuovi archivi temporanei scaricati in /tmp
       file:

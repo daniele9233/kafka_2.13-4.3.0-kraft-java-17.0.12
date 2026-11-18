@@ -172,7 +172,18 @@ kafka_auto_create_topics_enable: false
 kafka_delete_topic_enable: true
 
 # ------------------------------------------------------------------------------
-# 10. PARAMETRI JVM E SERVIZIO SYSTEMD
+# 10. ROTAZIONE DEI LOG APPLICATIVI DI KAFKA (/opt/kafka/logs)
+# ------------------------------------------------------------------------------
+# Nota: di default Kafka 4.x (log4j2.yaml) ruota i file di log ogni ora ma NON
+# cancella mai i file vecchi. Qui configuriamo sia Log4j2 sia /etc/logrotate.d/kafka
+# per ruotare per dimensione/giorno, comprimere (.gz) e cancellare oltre la retention.
+kafka_app_log_level: "INFO"
+kafka_app_log_max_size: "100MB"
+kafka_app_log_max_backup_index: 10
+kafka_app_log_retention_days: 14
+
+# ------------------------------------------------------------------------------
+# 11. PARAMETRI JVM E SERVIZIO SYSTEMD
 # ------------------------------------------------------------------------------
 kafka_heap_opts: "-Xmx2G -Xms2G"
 kafka_systemd_restart: "on-failure"

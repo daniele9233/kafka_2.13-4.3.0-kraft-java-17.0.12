@@ -114,6 +114,23 @@
     group: "{{ kafka_group }}"
     mode: '0600'
 
+- name: Configura rotazione log applicativi Kafka in {{ kafka_config_dir }}/log4j2.yaml
+  template:
+    src: log4j2.yaml.j2
+    dest: "{{ kafka_config_dir }}/log4j2.yaml"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0644'
+  notify: restart kafka
+
+- name: Configura /etc/logrotate.d/kafka per file di log in {{ kafka_logs_dir }}
+  template:
+    src: kafka-logrotate.j2
+    dest: /etc/logrotate.d/kafka
+    owner: root
+    group: root
+    mode: '0644'
+
 # ------------------------------------------------------------------------------
 # 6. Cluster ID e formattazione dei log KRaft
 # ------------------------------------------------------------------------------

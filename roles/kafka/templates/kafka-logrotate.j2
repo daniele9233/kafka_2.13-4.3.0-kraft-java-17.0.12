@@ -1,0 +1,11 @@
+{{ kafka_logs_dir }}/*.out {
+    daily
+    rotate {{ kafka_app_log_retention_days }}
+    maxsize {{ kafka_app_log_max_size | replace('MB', 'M') }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su {{ kafka_user }} {{ kafka_group }}
+}
