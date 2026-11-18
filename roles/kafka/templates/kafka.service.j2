@@ -1,22 +1,22 @@
+# /etc/systemd/system/kafka.service
 [Unit]
-Description=Apache Kafka Server
-Documentation=http://kafka.apache.org/documentation.html
-Requires=zookeeper.service
-After=zookeeper.service
+Description=Apache Kafka (KRaft)
+After=network.target
+Wants=network-online.target
 
 [Service]
-Type=simple
-User=kafka
-Group=kafka
+User={{ kafka_user }}
+Group={{ kafka_group }}
 Environment="JAVA_HOME={{ java_home }}"
+Environment="PATH={{ java_home }}/bin:{{ kafka_home }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="KAFKA_HEAP_OPTS={{ kafka_heap_opts }}"
-Environment="KAFKA_LOG4J_OPTS=-Dlog4j.configuration=file:{{ kafka_home }}/config/log4j.properties"
-Environment="LOG_DIR={{ kafka_home }}/logs"
-ExecStart={{ kafka_home }}/bin/kafka-server-start.sh {{ kafka_home }}/config/server.properties
+Environment="LOG_DIR={{ kafka_logs_dir }}"
+ExecStart={{ kafka_home }}/bin/kafka-server-start.sh {{ kafka_config_dir }}/server.properties
 ExecStop={{ kafka_home }}/bin/kafka-server-stop.sh
-Restart=on-failure
-RestartSec=10s
-LimitNOFILE=100000
+Restart={{ kafka_systemd_restart }}
+RestartSec={{ kafka_systemd_restart_sec }}
+LimitNOFILE={{ kafka_systemd_limit_nofile }}
+TimeoutStopSec={{ kafka_systemd_timeout_stop_sec }}
 
 [Install]
 WantedBy=multi-user.target

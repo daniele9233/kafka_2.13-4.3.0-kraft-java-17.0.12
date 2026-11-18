@@ -1,6 +1,0 @@
----
-- name: restart zookeeper
-  systemd:
-    name: zookeeper
-    state: restarted
-    daemon_reload: yes

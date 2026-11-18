@@ -1,78 +1,58 @@
-# Broker ID
-broker.id={{ kafka_broker_id }}
+# ============ KRaft ============
+process.roles={{ kafka_process_roles }}
+node.id={{ kafka_node_id }}
+controller.quorum.voters={% for host in groups['kafka_cluster'] %}{{ hostvars[host]['node_id'] | default(kafka_cluster_nodes[host].node_id) }}@{{ hostvars[host]['ansible_host'] }}:{{ kafka_controller_port }}{% if not loop.last %},{% endif %}{% endfor %}
 
-# Listeners e advertised listeners
-listeners=PLAINTEXT://{{ ansible_host }}:{{ kafka_plaintext_port }},SSL://{{ ansible_host }}:{{ kafka_port }}
-advertised.listeners=PLAINTEXT://{{ ansible_host }}:{{ kafka_plaintext_port }},SSL://{{ ansible_host }}:{{ kafka_port }}
 
-# Configurazione TLS/SSL
-{% if ssl_enabled %}
+# ============ Listener ============
+listeners={{ kafka_broker_listener_name }}://{{ ansible_host }}:{{ kafka_broker_port }},{{ kafka_controller_listener_name }}://{{ ansible_host }}:{{ kafka_controller_port }}
+advertised.listeners={{ kafka_broker_listener_name }}://{{ ansible_host }}:{{ kafka_broker_port }}
+inter.broker.listener.name={{ kafka_broker_listener_name }}
+controller.listener.names={{ kafka_controller_listener_name }}
+listener.security.protocol.map={{ kafka_listener_security_protocol_map }}
+
+num.network.threads={{ kafka_num_network_threads }}
+num.io.threads={{ kafka_num_io_threads }}
+socket.send.buffer.bytes={{ kafka_socket_send_buffer_bytes }}
+socket.receive.buffer.bytes={{ kafka_socket_receive_buffer_bytes }}
+socket.request.max.bytes={{ kafka_socket_request_max_bytes }}
+
+# ============ Log ============
+log.dirs={{ kafka_data_dir }}
+num.partitions={{ kafka_num_partitions }}
+default.replication.factor={{ kafka_default_replication_factor }}
+offsets.topic.replication.factor={{ kafka_offsets_topic_replication_factor }}
+transaction.state.log.replication.factor={{ kafka_transaction_state_log_replication_factor }}
+transaction.state.log.min.isr={{ kafka_transaction_state_log_min_isr }}
+min.insync.replicas={{ kafka_min_insync_replicas }}
+log.retention.hours={{ kafka_log_retention_hours }}
+log.segment.bytes={{ kafka_log_segment_bytes }}
+log.retention.check.interval.ms={{ kafka_log_retention_check_interval_ms }}
+auto.create.topics.enable={{ kafka_auto_create_topics_enable | lower }}
+delete.topic.enable={{ kafka_delete_topic_enable | lower }}
+
+# ============ TLS ============
 ssl.keystore.location={{ ssl_keystore_location }}
 ssl.keystore.password={{ ssl_keystore_password }}
 ssl.key.password={{ ssl_key_password }}
 ssl.truststore.location={{ ssl_truststore_location }}
 ssl.truststore.password={{ ssl_truststore_password }}
-ssl.client.auth=none
-ssl.endpoint.identification.algorithm=
+ssl.client.auth={{ ssl_client_auth }}
+ssl.endpoint.identification.algorithm={{ ssl_endpoint_identification_algorithm }}
 
-# Security inter-broker - usa PLAINTEXT per evitare problemi di autenticazione mutua
-security.inter.broker.protocol=PLAINTEXT
-{% else %}
-security.inter.broker.protocol=PLAINTEXT
-{% endif %}
+# ============ SASL / PLAIN ============
+sasl.enabled.mechanisms={{ sasl_enabled_mechanisms }}
+sasl.mechanism.inter.broker.protocol={{ sasl_inter_broker_mechanism }}
+sasl.mechanism.controller.protocol={{ sasl_controller_mechanism }}
 
-# Zookeeper
-zookeeper.connect={% for host in groups['kafka_cluster'] %}{{ hostvars[host]['ansible_host'] }}:{{ zookeeper_client_port }}{% if not loop.last %},{% endif %}{% endfor %}
+listener.name.{{ kafka_broker_listener_name | lower }}.plain.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="{{ kafka_admin_user }}" password="{{ kafka_admin_password }}" \
+  user_{{ kafka_admin_user }}="{{ kafka_admin_password }}" user_{{ kafka_app_user }}="{{ kafka_app_password }}"{% for u in kafka_additional_users | default([]) %} user_{{ u.username }}="{{ u.password }}"{% endfor %};
 
-zookeeper.connection.timeout.ms=18000
+listener.name.{{ kafka_controller_listener_name | lower }}.plain.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="{{ kafka_admin_user }}" password="{{ kafka_admin_password }}" \
+  user_{{ kafka_admin_user }}="{{ kafka_admin_password }}";
 
-# Directory log
-log.dirs={{ kafka_log_dirs }}
-
-# Configurazioni partizioni e replicazione
-num.partitions={{ kafka_num_partitions }}
-default.replication.factor={{ kafka_replication_factor }}
-min.insync.replicas={{ kafka_min_insync_replicas }}
-offsets.topic.replication.factor={{ kafka_replication_factor }}
-transaction.state.log.replication.factor={{ kafka_replication_factor }}
-transaction.state.log.min.isr={{ kafka_min_insync_replicas }}
-
-# Configurazioni log retention
-log.retention.hours=168
-log.retention.check.interval.ms=300000
-log.segment.bytes=1073741824
-
-# Network threads
-num.network.threads=3
-num.io.threads=8
-
-# Socket settings
-socket.send.buffer.bytes=102400
-socket.receive.buffer.bytes=102400
-socket.request.max.bytes=104857600
-
-# Configurazioni gruppo consumatori
-group.initial.rebalance.delay.ms=3000
-
-# Configurazioni cluster
-auto.create.topics.enable=false
-delete.topic.enable=true
-
-# Configurazioni controller
-controller.socket.timeout.ms=30000
-
-# Configurazioni aggiuntive per stabilità
-replica.lag.time.max.ms=30000
-replica.socket.timeout.ms=30000
-replica.socket.receive.buffer.bytes=65536
-
-# Log cleanup
-log.cleaner.enable=true
-log.cleanup.policy=delete
-
-# Compression
-compression.type=producer
-
-# Message size limits
-message.max.bytes=1048576
-replica.fetch.max.bytes=1048576
+# ============ ACL ============
+authorizer.class.name={{ kafka_authorizer_class }}
+super.users={{ kafka_super_users }}

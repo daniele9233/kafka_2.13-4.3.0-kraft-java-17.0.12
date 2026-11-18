@@ -1,67 +1,224 @@
 ---
-- name: Crea utente kafka
-  user:
-    name: kafka
-    system: yes
-    shell: /bin/false
-    home: "{{ kafka_home }}"
+# ==============================================================================
+# RUOLO KAFKA 4.x KRAFT (Modalità Combined + SASL_SSL + PLAIN + ACL)
+# Riferimento: Guida_Kafka_KRaft_3_Nodi_SASL_SSL_v3.pdf
+# ==============================================================================
 
-- name: Crea directory per Kafka
+- name: Assicura gruppo {{ kafka_group }}
+  group:
+    name: "{{ kafka_group }}"
+    state: present
+
+- name: Assicura utente {{ kafka_user }} con shell {{ kafka_user_shell }} e home {{ kafka_home }}
+  user:
+    name: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    home: "{{ kafka_home }}"
+    shell: "{{ kafka_user_shell }}"
+    create_home: yes
+    state: present
+
+- name: Crea directory per Kafka su partizione {{ install_base }}
   file:
     path: "{{ item }}"
     state: directory
-    owner: kafka
-    group: kafka
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
     mode: '0755'
   loop:
     - "{{ kafka_home }}"
-    - "{{ kafka_log_dirs }}"
-    - "{{ kafka_home }}/logs"
-    - "{{ kafka_home }}/config/certs"
+    - "{{ kafka_data_dir }}"
+    - "{{ kafka_logs_dir }}"
+    - "{{ kafka_config_dir }}"
+    - "{{ kafka_security_dir }}"
 
-- name: Verifica se Kafka è già installato
+# ------------------------------------------------------------------------------
+# 3.3 Download e installazione Kafka 4.x
+# ------------------------------------------------------------------------------
+- name: Verifica se Kafka è già installato in {{ kafka_home }}
   stat:
     path: "{{ kafka_home }}/bin/kafka-server-start.sh"
   register: kafka_installed
 
-- name: Scarica Kafka
+- name: Scarica Apache Kafka {{ kafka_version }} (mirror principale)
   get_url:
     url: "{{ kafka_url }}"
     dest: "/tmp/{{ kafka_archive }}"
     timeout: 300
+  register: kafka_download_primary
+  ignore_errors: yes
   when: not kafka_installed.stat.exists
 
-- name: Estrai Kafka
+- name: Scarica Apache Kafka {{ kafka_version }} (fallback archive.apache.org)
+  get_url:
+    url: "{{ kafka_archive_fallback_url }}"
+    dest: "/tmp/{{ kafka_archive }}"
+    timeout: 300
+  when:
+    - not kafka_installed.stat.exists
+    - kafka_download_primary is failed
+
+- name: Estrai Apache Kafka {{ kafka_version }} in {{ kafka_home }}
   unarchive:
     src: "/tmp/{{ kafka_archive }}"
     dest: "{{ kafka_home }}"
     remote_src: yes
     extra_opts: ['--strip-components=1']
-    owner: kafka
-    group: kafka
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
   when: not kafka_installed.stat.exists
 
-- name: Genera certificati SSL per TLS
+- name: Configura fallback JAVA_HOME confinata in kafka-run-class.sh
+  blockinfile:
+    path: "{{ kafka_home }}/bin/kafka-run-class.sh"
+    insertafter: "^#!/bin/bash"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - CONFINED JAVA_HOME"
+    block: |
+      if [ -z "$JAVA_HOME" ]; then
+        export JAVA_HOME="{{ java_home }}"
+        export PATH="$JAVA_HOME/bin:$PATH"
+      fi
+
+# ------------------------------------------------------------------------------
+# 4. Certificati TLS: CA, Keystore e Truststore
+# ------------------------------------------------------------------------------
+- name: Genera e distribuisci certificati TLS (CA, Keystore per nodo, Truststore)
   include_tasks: ssl_certificates.yml
-  when: ssl_enabled
+  when: ssl_enabled | bool
 
-- name: Configura broker ID
-  set_fact:
-    kafka_broker_id: "{{ zookeeper_id }}"
-
-- name: Configura server.properties
+# ------------------------------------------------------------------------------
+# 5. Configurazione server.properties e client.properties (SASL_SSL + PLAIN)
+# ------------------------------------------------------------------------------
+- name: Configura {{ kafka_config_dir }}/server.properties
   template:
     src: server.properties.j2
-    dest: "{{ kafka_home }}/config/server.properties"
-    owner: kafka
-    group: kafka
-    mode: '0644'
+    dest: "{{ kafka_config_dir }}/server.properties"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
   notify: restart kafka
 
-- name: Crea systemd service per Kafka
+- name: Configura {{ kafka_client_properties }} (utente admin)
+  template:
+    src: client.properties.j2
+    dest: "{{ kafka_client_properties }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
+
+- name: Configura {{ kafka_appclient_properties }} (utente appclient)
+  template:
+    src: appclient.properties.j2
+    dest: "{{ kafka_appclient_properties }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
+
+# ------------------------------------------------------------------------------
+# 6. Cluster ID e formattazione dei log KRaft
+# ------------------------------------------------------------------------------
+- name: Verifica se i log KRaft sono già formattati ({{ kafka_data_dir }}/meta.properties)
+  stat:
+    path: "{{ kafka_data_dir }}/meta.properties"
+  register: meta_properties_stat
+
+- name: Leggi cluster.id esistente sul primo nodo se già formattato
+  shell: grep -E '^cluster\.id=' "{{ kafka_data_dir }}/meta.properties" | cut -d'=' -f2
+  register: existing_cluster_id_cmd
+  changed_when: false
+  when:
+    - inventory_hostname == groups['kafka_cluster'][0]
+    - meta_properties_stat.stat.exists
+  run_once: true
+
+- name: Genera nuovo Cluster ID sul primo nodo (kafka-storage.sh random-uuid)
+  become: yes
+  become_user: "{{ kafka_user }}"
+  environment:
+    JAVA_HOME: "{{ java_home }}"
+    PATH: "{{ java_home }}/bin:{{ kafka_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+  command: "{{ kafka_home }}/bin/kafka-storage.sh random-uuid"
+  register: generated_cluster_id_cmd
+  changed_when: false
+  when:
+    - kafka_cluster_id | length == 0
+    - inventory_hostname == groups['kafka_cluster'][0]
+    - not meta_properties_stat.stat.exists
+  run_once: true
+
+- name: Imposta Cluster ID condiviso per tutti i nodi del cluster
+  set_fact:
+    kafka_effective_cluster_id: >-
+      {{
+        kafka_cluster_id
+        if (kafka_cluster_id | length > 0)
+        else (
+          hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout
+          if (hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd is defined
+              and hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout is defined
+              and hostvars[groups['kafka_cluster'][0]].existing_cluster_id_cmd.stdout | length > 0)
+          else hostvars[groups['kafka_cluster'][0]].generated_cluster_id_cmd.stdout
+        ) | trim
+      }}
+
+- name: Mostra Cluster ID KRaft selezionato
+  debug:
+    msg: "KRaft Cluster ID per {{ inventory_hostname }} (node.id={{ kafka_node_id }}): {{ kafka_effective_cluster_id }}"
+
+- name: Salva Cluster ID in {{ kafka_config_dir }}/cluster.id per riferimento
+  copy:
+    content: "{{ kafka_effective_cluster_id }}\n"
+    dest: "{{ kafka_config_dir }}/cluster.id"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
+
+- name: Assicura permessi corretti su {{ kafka_home }} prima della formattazione
+  file:
+    path: "{{ kafka_home }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    recurse: yes
+
+- name: Formatta storage KRaft su tutti i nodi con lo stesso Cluster ID
+  become: yes
+  become_user: "{{ kafka_user }}"
+  environment:
+    JAVA_HOME: "{{ java_home }}"
+    PATH: "{{ java_home }}/bin:{{ kafka_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+  shell: |
+    {{ kafka_home }}/bin/kafka-storage.sh format \
+      -t "{{ kafka_effective_cluster_id }}" \
+      -c "{{ kafka_config_dir }}/server.properties" \
+      --ignore-formatted \
+    || {{ kafka_home }}/bin/kafka-storage.sh format \
+      --standalone \
+      -t "{{ kafka_effective_cluster_id }}" \
+      -c "{{ kafka_config_dir }}/server.properties" \
+      --ignore-formatted
+  args:
+    creates: "{{ kafka_data_dir }}/meta.properties"
+  when: not meta_properties_stat.stat.exists
+
+- name: Verifica contenuto di {{ kafka_data_dir }}/meta.properties
+  command: cat "{{ kafka_data_dir }}/meta.properties"
+  register: meta_props_content
+  changed_when: false
+
+- name: Mostra meta.properties del nodo
+  debug:
+    msg: "{{ meta_props_content.stdout_lines }}"
+
+# ------------------------------------------------------------------------------
+# 7. Configurazione Systemd e Avvio del Cluster
+# ------------------------------------------------------------------------------
+- name: Crea unit systemd /etc/systemd/system/kafka.service
   template:
     src: kafka.service.j2
     dest: /etc/systemd/system/kafka.service
+    owner: root
+    group: root
     mode: '0644'
   notify: restart kafka
 
@@ -69,227 +226,103 @@
   systemd:
     daemon_reload: yes
 
-- name: Abilita e avvia Kafka
+- name: Abilita e avvia il servizio Kafka su tutti i nodi
   systemd:
     name: kafka
     enabled: yes
     state: started
 
-- name: Attendi che Kafka sia pronto sulla porta SSL
+- name: Attendi che la porta CONTROLLER ({{ kafka_controller_port }}) sia in ascolto
   wait_for:
     host: "{{ ansible_host }}"
-    port: "{{ kafka_port }}"
-    delay: 10
-    timeout: 60
+    port: "{{ kafka_controller_port }}"
+    delay: 3
+    timeout: 90
     state: started
 
-- name: Attendi che Kafka sia pronto sulla porta PLAINTEXT
+- name: Attendi che la porta BROKER ({{ kafka_broker_port }}) sia in ascolto
   wait_for:
     host: "{{ ansible_host }}"
-    port: "{{ kafka_plaintext_port }}"
+    port: "{{ kafka_broker_port }}"
     delay: 5
-    timeout: 30
+    timeout: 90
     state: started
 
-- name: Verifica stato finale Kafka
+# ------------------------------------------------------------------------------
+# 9. Configurazione ACL di base per appclient (Sez. 9.2 della guida)
+# ------------------------------------------------------------------------------
+- name: Concedi ACL sui topic interni per l'utente {{ kafka_app_user }} (Sez. 9.2 guida)
+  become: yes
+  become_user: "{{ kafka_user }}"
+  environment:
+    JAVA_HOME: "{{ java_home }}"
+    PATH: "{{ java_home }}/bin:{{ kafka_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+  shell: |
+    BS="{% for host in groups['kafka_cluster'] %}{{ hostvars[host]['ansible_host'] }}:{{ kafka_broker_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+    CC="--command-config {{ kafka_client_properties }}"
+
+    {{ kafka_home }}/bin/kafka-acls.sh --bootstrap-server "$BS" $CC --add \
+      --allow-principal "User:{{ kafka_app_user }}" --operation Read --operation Write \
+      --topic '__consumer_offsets' --group '*'
+
+    {{ kafka_home }}/bin/kafka-acls.sh --bootstrap-server "$BS" $CC --add \
+      --allow-principal "User:{{ kafka_app_user }}" --operation Create --operation Describe \
+      --cluster
+
+    {{ kafka_home }}/bin/kafka-acls.sh --bootstrap-server "$BS" $CC --add \
+      --allow-principal "User:{{ kafka_app_user }}" --operation Describe \
+      --topic '*'
+  when:
+    - kafka_configure_default_acls | default(true) | bool
+    - inventory_hostname == groups['kafka_cluster'][0]
+  run_once: true
+  register: acl_init_result
+  changed_when: "'Adding ACLs' in acl_init_result.stdout"
+
+# ------------------------------------------------------------------------------
+# Wrapper Scripts (opzionali in /usr/local/bin)
+# ------------------------------------------------------------------------------
+- name: Crea script wrapper per i comandi Kafka 4 KRaft in /usr/local/bin
+  copy:
+    content: |
+      #!/bin/bash
+      export JAVA_HOME="{{ java_home }}"
+      export PATH="$JAVA_HOME/bin:$PATH"
+      exec {{ kafka_home }}/bin/{{ item }}.sh "$@"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: '0755'
+    owner: root
+    group: root
+  loop:
+    - kafka-topics
+    - kafka-console-producer
+    - kafka-console-consumer
+    - kafka-broker-api-versions
+    - kafka-consumer-groups
+    - kafka-configs
+    - kafka-acls
+    - kafka-log-dirs
+    - kafka-reassign-partitions
+    - kafka-leader-election
+    - kafka-storage
+    - kafka-metadata-quorum
+    - kafka-features
+    - kafka-dump-log
+    - kafka-metadata-shell
+  when: kafka_install_wrappers | default(true) | bool
+
+- name: Verifica stato finale del servizio systemd kafka
   systemd:
     name: kafka
   register: kafka_final_status
 
-- name: Mostra stato finale Kafka
+- name: Mostra stato finale del nodo Kafka KRaft
   debug:
     msg:
-      - "Kafka Broker ID: {{ kafka_broker_id }}"
-      - "Stato: {{ kafka_final_status.status.ActiveState }}"
-      - "Listening SSL: {{ ansible_host }}:{{ kafka_port }}"
-      - "Listening PLAINTEXT: {{ ansible_host }}:{{ kafka_plaintext_port }}"
-
-# ========================================
-# WRAPPER SCRIPTS PER COMANDI KAFKA
-# ========================================
-
-- name: Crea script wrapper kafka-topics
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-topics.sh "$@"
-    dest: /usr/local/bin/kafka-topics
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-console-producer
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-console-producer.sh "$@"
-    dest: /usr/local/bin/kafka-console-producer
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-console-consumer
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-console-consumer.sh "$@"
-    dest: /usr/local/bin/kafka-console-consumer
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-broker-api-versions
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-broker-api-versions.sh "$@"
-    dest: /usr/local/bin/kafka-broker-api-versions
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-consumer-groups
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-consumer-groups.sh "$@"
-    dest: /usr/local/bin/kafka-consumer-groups
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-configs
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-configs.sh "$@"
-    dest: /usr/local/bin/kafka-configs
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-acls
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-acls.sh "$@"
-    dest: /usr/local/bin/kafka-acls
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-log-dirs
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-log-dirs.sh "$@"
-    dest: /usr/local/bin/kafka-log-dirs
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-reassign-partitions
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-reassign-partitions.sh "$@"
-    dest: /usr/local/bin/kafka-reassign-partitions
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper kafka-preferred-replica-election
-  copy:
-    content: |
-      #!/bin/bash
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      exec {{ kafka_home }}/bin/kafka-leader-election.sh "$@"
-    dest: /usr/local/bin/kafka-leader-election
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Crea script wrapper generico per tutti i comandi Kafka
-  copy:
-    content: |
-      #!/bin/bash
-      # Wrapper generico per eseguire qualsiasi comando Kafka con Java configurato
-      export JAVA_HOME={{ java_home }}
-      export PATH=$JAVA_HOME/bin:$PATH
-      export KAFKA_HOME={{ kafka_home }}
-      
-      if [ $# -eq 0 ]; then
-        echo "Usage: kafka-run <command> [args...]"
-        echo "Example: kafka-run kafka-topics.sh --list --bootstrap-server localhost:9092"
-        exit 1
-      fi
-      
-      exec {{ kafka_home }}/bin/"$@"
-    dest: /usr/local/bin/kafka-run
-    mode: '0755'
-    owner: root
-    group: root
-
-- name: Mostra comandi wrapper disponibili
-  debug:
-    msg:
-      - "=========================================="
-      - "WRAPPER KAFKA INSTALLATI CON SUCCESSO"
-      - "=========================================="
-      - ""
-      - "Comandi disponibili da qualsiasi utente:"
-      - "  - kafka-topics"
-      - "  - kafka-console-producer"
-      - "  - kafka-console-consumer"
-      - "  - kafka-broker-api-versions"
-      - "  - kafka-consumer-groups"
-      - "  - kafka-configs"
-      - "  - kafka-acls"
-      - "  - kafka-log-dirs"
-      - "  - kafka-reassign-partitions"
-      - "  - kafka-leader-election"
-      - "  - kafka-run (wrapper generico)"
-      - ""
-      - "Esempi d'uso:"
-      - "  kafka-topics --list --bootstrap-server {{ ansible_host }}:9092"
-      - "  kafka-topics --describe --topic test --bootstrap-server {{ ansible_host }}:9092"
-      - "  kafka-console-producer --topic test --bootstrap-server {{ ansible_host }}:9092"
-      - "  kafka-console-consumer --topic test --from-beginning --bootstrap-server {{ ansible_host }}:9092"
-      - ""
-      - "Per comandi non wrappati, usa:"
-      - "  kafka-run <nome-script.sh> [args]"
-      - "=========================================="
-
-- name: Crea client SSL properties corrette
-  copy:
-    content: |
-      security.protocol=SSL
-      ssl.truststore.location={{ kafka_home }}/config/certs/kafka.server.truststore.jks
-      ssl.truststore.password={{ ssl_truststore_password }}
-      ssl.keystore.location={{ kafka_home }}/config/certs/kafka.server.keystore.jks
-      ssl.keystore.password={{ ssl_keystore_password }}
-      ssl.key.password={{ ssl_key_password }}
-      ssl.endpoint.identification.algorithm=
-    dest: "{{ kafka_home }}/config/client-ssl.properties"
-    owner: kafka
-    group: kafka
-    mode: '0644'
+      - "Nodo: {{ inventory_hostname }} ({{ ansible_host }})"
+      - "KRaft node.id: {{ kafka_node_id }} (ruoli: {{ kafka_process_roles }})"
+      - "Stato servizio: {{ kafka_final_status.status.ActiveState }}"
+      - "Listener BROKER (SASL_SSL): {{ ansible_host }}:{{ kafka_broker_port }}"
+      - "Listener CONTROLLER (SASL_SSL): {{ ansible_host }}:{{ kafka_controller_port }}"
+      - "Client config admin: {{ kafka_client_properties }}"
+      - "Client config appclient: {{ kafka_appclient_properties }}"

@@ -1,51 +1,184 @@
 ---
-# Versioni e URL
-java_version: "17.0.16"
-java_url: "https://cdn.azul.com/zulu/bin/zulu17.60.17-ca-jdk17.0.16-linux_x64.tar.gz"
-java_archive: "zulu17.60.17-ca-jdk17.0.16-linux_x64.tar.gz"
+# ==============================================================================
+# FILE GLOBALE DELLE VARIABILI - KAFKA 4.x KRAFT CLUSTER (SASL_SSL + PLAIN)
+# Riferimento: Guida_Kafka_KRaft_3_Nodi_SASL_SSL_v3.pdf
+# OS Target: Ubuntu 26.04 LTS
+# ==============================================================================
 
-zookeeper_version: "3.9.4"
-zookeeper_url: "https://archive.apache.org/dist/zookeeper/zookeeper-3.9.4/apache-zookeeper-3.9.4-bin.tar.gz"
-zookeeper_archive: "apache-zookeeper-3.9.4-bin.tar.gz"
+# ------------------------------------------------------------------------------
+# 1. CONNESSIONE ANSIBLE E SISTEMA OPERATIVO
+# ------------------------------------------------------------------------------
+ansible_user: "root"
+ansible_python_interpreter: "/usr/bin/python3"
 
-kafka_version: "3.9.1"
-kafka_scala_version: "2.13"
-kafka_url: "https://archive.apache.org/dist/kafka/3.9.1/kafka_2.13-3.9.1.tgz"
-kafka_archive: "kafka_2.13-3.9.1.tgz"
+system_packages:
+  - wget
+  - curl
+  - tar
+  - net-tools
+  - vim
+  - openssl
+  - ca-certificates
+  - acl
 
-# Directory di installazione
+# ------------------------------------------------------------------------------
+# 2. ARCHITETTURA DEL CLUSTER (NODI, IP, RUOLI, PORTE)
+# ------------------------------------------------------------------------------
+kafka_cluster_nodes:
+  Kafka-zkp01_prod:
+    ip: "10.41.239.54"
+    node_id: 1
+  Kafka-zkp02_prod:
+    ip: "10.41.239.55"
+    node_id: 2
+  kafka-zkp03_prod:
+    ip: "10.41.239.56"
+    node_id: 3
+
+# ID univoco del nodo corrente (prende node_id dall'inventory o dalla mappa sopra)
+kafka_node_id: "{{ node_id | default(kafka_cluster_nodes[inventory_hostname].node_id) }}"
+
+# Modalità KRaft combined (broker + controller su tutti e 3 i nodi)
+kafka_process_roles: "broker,controller"
+
+# Porte e Listener
+kafka_broker_port: 9092
+kafka_controller_port: 9093
+kafka_broker_listener_name: "BROKER"
+kafka_controller_listener_name: "CONTROLLER"
+kafka_security_protocol: "SASL_SSL"
+kafka_listener_security_protocol_map: "{{ kafka_broker_listener_name }}:{{ kafka_security_protocol }},{{ kafka_controller_listener_name }}:{{ kafka_security_protocol }}"
+
+# Cluster ID KRaft:
+# Se lasciato vuoto (""), viene generato automaticamente sul nodo 1 tramite
+# `kafka-storage.sh random-uuid` e condiviso su tutti i nodi del cluster.
+kafka_cluster_id: ""
+
+# ------------------------------------------------------------------------------
+# 3. UTENTE DI SERVIZIO E DIRECTORY (PARTIZIONE /opt GIÀ MONTATA)
+# ------------------------------------------------------------------------------
+kafka_user: "kafka"
+kafka_group: "kafka"
+kafka_user_shell: "/bin/bash"
+
 install_base: "/opt"
-java_home: "{{ install_base }}/jdk17"
-zookeeper_home: "{{ install_base }}/zookeeper"
 kafka_home: "{{ install_base }}/kafka"
+kafka_data_dir: "{{ kafka_home }}/data"
+kafka_logs_dir: "{{ kafka_home }}/logs"
+kafka_config_dir: "{{ kafka_home }}/config"
+kafka_security_dir: "{{ kafka_config_dir }}/security"
 
-# Directory dati
-zookeeper_data_dir: "/var/lib/zookeeper"
-kafka_log_dirs: "/var/lib/kafka-logs"
+# File di configurazione client generati automaticamente su ogni nodo
+kafka_client_properties: "{{ kafka_home }}/client.properties"
+kafka_appclient_properties: "{{ kafka_home }}/appclient.properties"
 
-# Porte
-zookeeper_client_port: 2181
-zookeeper_peer_port: 2888
-zookeeper_leader_port: 3888
-kafka_port: 9093
-kafka_plaintext_port: 9092
+# ------------------------------------------------------------------------------
+# 4. JAVA (ZULU JDK 17 LTS CONFINATA ALL'UTENTE KAFKA)
+# ------------------------------------------------------------------------------
+# Kafka 4.x richiede obbligatoriamente Java 17+ (Java 11 non supportata).
+# La JVM viene installata dentro /opt/kafka/jdk17 (sulla partizione /opt) e
+# confinata all'utente `kafka` tramite ~/.bashrc, ~/.profile e nel unit systemd,
+# senza alterare la Java di sistema di Ubuntu 26 per gli altri utenti.
+java_version: "17.0.12"
+java_archive: "zulu17.52.17-ca-jdk17.0.12-linux_x64.tar.gz"
+java_url: "https://cdn.azul.com/zulu/bin/{{ java_archive }}"
+java_home: "{{ kafka_home }}/jdk17"
+java_confined_to_user: true
+java_configure_system_alternatives: false
 
-# Configurazioni TLS
+# ------------------------------------------------------------------------------
+# 5. VERSIONE E DOWNLOAD APACHE KAFKA 4.x
+# ------------------------------------------------------------------------------
+kafka_version: "4.3.0"
+kafka_scala_version: "2.13"
+kafka_archive: "kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+kafka_url: "https://downloads.apache.org/kafka/{{ kafka_version }}/{{ kafka_archive }}"
+kafka_archive_fallback_url: "https://archive.apache.org/dist/kafka/{{ kafka_version }}/{{ kafka_archive }}"
+
+# ------------------------------------------------------------------------------
+# 6. CERTIFICATI TLS (CA INTERNA, KEYSTORE PER NODO, TRUSTSTORE CONDIVISO)
+# ------------------------------------------------------------------------------
 ssl_enabled: true
-ssl_keystore_location: "{{ kafka_home }}/config/certs/kafka.server.keystore.jks"
-ssl_truststore_location: "{{ kafka_home }}/config/certs/kafka.server.truststore.jks"
-ssl_keystore_password: "changeit"
-ssl_truststore_password: "changeit"
-ssl_key_password: "changeit"
+ssl_ca_cn: "Kafka-Security-CA"
+ssl_ca_key_size: 4096
+ssl_keystore_key_size: 2048
+ssl_validity_days: 3650
+ssl_keystore_alias: "localhost"
+ssl_ca_alias: "CARoot"
 
-# Parametri Kafka
-kafka_heap_opts: "-Xmx1G -Xms1G"
+ssl_keystore_password: "RASUNICOcoll.2026"
+ssl_key_password: "RASUNICOcoll.2026"
+ssl_truststore_password: "RASUNICOcoll.2026"
+
+ssl_truststore_filename: "kafka.truststore.jks"
+ssl_truststore_location: "{{ kafka_security_dir }}/{{ ssl_truststore_filename }}"
+ssl_keystore_filename: "kafka-{{ ansible_host }}.keystore.jks"
+ssl_keystore_location: "{{ kafka_security_dir }}/{{ ssl_keystore_filename }}"
+
+ssl_client_auth: "requested"
+# Vuoto = verifica hostname disattivata (come da guida sez. 4 e 5.1); i certificati includono comunque SAN=IP:<ip>
+ssl_endpoint_identification_algorithm: ""
+
+# Directory temporanea sul controller Ansible per la distribuzione sicura dei certificati
+ssl_controller_tmp_dir: "/tmp/kafka-kraft-certs"
+
+# ------------------------------------------------------------------------------
+# 7. AUTENTICAZIONE SASL / PLAIN E CREDENZIALI JAAS
+# ------------------------------------------------------------------------------
+sasl_enabled_mechanisms: "PLAIN"
+sasl_inter_broker_mechanism: "PLAIN"
+sasl_controller_mechanism: "PLAIN"
+
+# Utente superuser / inter-broker / controller
+kafka_admin_user: "admin"
+kafka_admin_password: "RASUNICOcoll.2026"
+
+# Utente applicativo client
+kafka_app_user: "appclient"
+kafka_app_password: "RASUNICOcoll.2026"
+
+# Eventuali utenti SASL/PLAIN aggiuntivi (lista di dizionari: [{ username: "u1", password: "p1" }])
+kafka_additional_users: []
+
+# ------------------------------------------------------------------------------
+# 8. AUTORIZZAZIONE E ACL (STANDARDAUTHORIZER)
+# ------------------------------------------------------------------------------
+kafka_authorizer_class: "org.apache.kafka.metadata.authorizer.StandardAuthorizer"
+kafka_super_users: "User:{{ kafka_admin_user }}"
+
+# Se true, configura automaticamente le ACL di base sui topic interni per `appclient` (sez. 9.2 guida)
+kafka_configure_default_acls: true
+
+# ------------------------------------------------------------------------------
+# 9. PARAMETRI SERVER.PROPERTIES (RETE, LOG, REPLICAZIONE)
+# ------------------------------------------------------------------------------
+kafka_num_network_threads: 8
+kafka_num_io_threads: 16
+kafka_socket_send_buffer_bytes: 102400
+kafka_socket_receive_buffer_bytes: 102400
+kafka_socket_request_max_bytes: 104857600
+
 kafka_num_partitions: 3
-kafka_replication_factor: 3
+kafka_default_replication_factor: 3
+kafka_offsets_topic_replication_factor: 3
+kafka_transaction_state_log_replication_factor: 3
+kafka_transaction_state_log_min_isr: 2
 kafka_min_insync_replicas: 2
 
-# Parametri Zookeeper
-zookeeper_heap_opts: "-Xmx512M -Xms512M"
-zookeeper_tick_time: 2000
-zookeeper_init_limit: 10
-zookeeper_sync_limit: 5
+kafka_log_retention_hours: 168
+kafka_log_segment_bytes: 1073741824
+kafka_log_retention_check_interval_ms: 300000
+kafka_auto_create_topics_enable: false
+kafka_delete_topic_enable: true
+
+# ------------------------------------------------------------------------------
+# 10. PARAMETRI JVM E SERVIZIO SYSTEMD
+# ------------------------------------------------------------------------------
+kafka_heap_opts: "-Xmx2G -Xms2G"
+kafka_systemd_restart: "on-failure"
+kafka_systemd_restart_sec: 10
+kafka_systemd_limit_nofile: 100000
+kafka_systemd_timeout_stop_sec: 300
+
+# Installa anche gli script wrapper in /usr/local/bin per comodità amministrativa
+kafka_install_wrappers: true

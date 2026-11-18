@@ -1,57 +1,143 @@
 ---
-- name: Crea directory per Java
+# ==============================================================================
+# RUOLO JAVA: Installazione Zulu JDK 17 LTS confinata all'utente kafka
+# ==============================================================================
+
+- name: Crea gruppo di sistema {{ kafka_group }}
+  group:
+    name: "{{ kafka_group }}"
+    state: present
+
+- name: Crea utente {{ kafka_user }} con home in {{ kafka_home }}
+  user:
+    name: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    home: "{{ kafka_home }}"
+    shell: "{{ kafka_user_shell }}"
+    create_home: yes
+    state: present
+
+- name: Assicura permessi sulla home directory {{ kafka_home }}
+  file:
+    path: "{{ kafka_home }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0755'
+
+- name: Verifica presenza file profilo standard in {{ kafka_home }}
+  stat:
+    path: "{{ kafka_home }}/{{ item }}"
+  loop:
+    - .bashrc
+    - .profile
+  register: skel_files_check
+
+- name: Copia .bashrc e .profile da /etc/skel se mancanti
+  copy:
+    src: "/etc/skel/{{ item.item }}"
+    dest: "{{ kafka_home }}/{{ item.item }}"
+    remote_src: yes
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0644'
+  loop: "{{ skel_files_check.results }}"
+  when: not item.stat.exists
+  ignore_errors: yes
+
+- name: Crea directory per la JVM confinata ({{ java_home }})
   file:
     path: "{{ java_home }}"
     state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
     mode: '0755'
 
-- name: Verifica se Java è già installato
+- name: Verifica se Zulu JDK 17 è già installata in {{ java_home }}
   stat:
     path: "{{ java_home }}/bin/java"
   register: java_installed
 
-- name: Scarica Zulu JDK 17
+- name: Scarica Zulu JDK 17 ({{ java_archive }})
   get_url:
     url: "{{ java_url }}"
     dest: "/tmp/{{ java_archive }}"
     timeout: 300
   when: not java_installed.stat.exists
 
-- name: Estrai Zulu JDK 17 direttamente nella directory corretta
+- name: Estrai Zulu JDK 17 in {{ java_home }}
   unarchive:
     src: "/tmp/{{ java_archive }}"
     dest: "{{ java_home }}"
     remote_src: yes
     extra_opts: ['--strip-components=1']
-    owner: root
-    group: root
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
   when: not java_installed.stat.exists
 
-- name: Verifica che Java esista dopo estrazione
+- name: Verifica che il binario java e keytool esistano dopo l'estrazione
   stat:
-    path: "{{ java_home }}/bin/java"
-  register: java_check
-
-- name: Mostra errore se Java non è stato estratto
-  fail:
-    msg: "Java non è stato estratto correttamente in {{ java_home }}"
-  when: not java_check.stat.exists
-
-- name: Configura JAVA_HOME nel profilo di sistema
-  lineinfile:
-    path: /etc/profile.d/java.sh
-    line: "{{ item }}"
-    create: yes
-    mode: '0644'
+    path: "{{ java_home }}/bin/{{ item }}"
   loop:
-    - "export JAVA_HOME={{ java_home }}"
-    - "export PATH=$JAVA_HOME/bin:$PATH"
+    - java
+    - keytool
+  register: java_bins_check
 
-- name: Verifica installazione Java
-  shell: "{{ java_home }}/bin/java -version"
+- name: Fallisci se Java non è stata estratta correttamente
+  fail:
+    msg: "Binario {{ item.item }} non trovato in {{ java_home }}/bin"
+  loop: "{{ java_bins_check.results }}"
+  when: not item.stat.exists
+
+- name: Configura JAVA_HOME e PATH confinati nel .bashrc dell'utente {{ kafka_user }}
+  blockinfile:
+    path: "{{ kafka_home }}/.bashrc"
+    create: yes
+    insertbefore: BOF
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0644'
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - KAFKA CONFINED JAVA"
+    block: |
+      export JAVA_HOME="{{ java_home }}"
+      export KAFKA_HOME="{{ kafka_home }}"
+      export PATH="$JAVA_HOME/bin:$KAFKA_HOME/bin:$PATH"
+  when: java_confined_to_user | bool
+
+- name: Configura JAVA_HOME e PATH confinati nel .profile dell'utente {{ kafka_user }}
+  blockinfile:
+    path: "{{ kafka_home }}/.profile"
+    create: yes
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0644'
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - KAFKA CONFINED JAVA"
+    block: |
+      export JAVA_HOME="{{ java_home }}"
+      export KAFKA_HOME="{{ kafka_home }}"
+      export PATH="$JAVA_HOME/bin:$KAFKA_HOME/bin:$PATH"
+  when: java_confined_to_user | bool
+
+- name: Rimuovi eventuale /etc/profile.d/java.sh globale se Java è confinata all'utente
+  file:
+    path: /etc/profile.d/java.sh
+    state: absent
+  when: java_confined_to_user | bool
+
+- name: Configura update-alternatives di sistema (solo se richiesto)
+  shell: |
+    update-alternatives --install /usr/bin/java java {{ java_home }}/bin/java 1
+    update-alternatives --set java {{ java_home }}/bin/java
+  when: java_configure_system_alternatives | default(false) | bool
+
+- name: Verifica funzionamento Java confinata con il profilo dell'utente {{ kafka_user }}
+  shell: su - {{ kafka_user }} -c "java -version && which java"
   register: java_version_output
   changed_when: false
 
-- name: Mostra versione Java
+- name: Mostra versione e percorso Java attiva per l'utente {{ kafka_user }}
   debug:
-    var: java_version_output.stderr_lines
+    msg:
+      - "Java home confinata: {{ java_home }}"
+      - "Output java -version: {{ java_version_output.stderr_lines }}"
+      - "Percorso binario java: {{ java_version_output.stdout_lines }}"

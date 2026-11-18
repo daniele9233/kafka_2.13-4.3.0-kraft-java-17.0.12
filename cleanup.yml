@@ -1,24 +1,24 @@
 ---
-- name: Cleanup installazione precedente Kafka e Zookeeper
+- name: Cleanup installazione Cluster Kafka KRaft (e/o precedenti installazioni)
   hosts: kafka_cluster
   become: yes
-  
+
   tasks:
-    - name: Ferma servizio Kafka
+    - name: Ferma e disabilita servizio Kafka
       systemd:
         name: kafka
         state: stopped
         enabled: no
       ignore_errors: yes
 
-    - name: Ferma servizio Zookeeper
+    - name: Ferma eventuale servizio Zookeeper legacy
       systemd:
         name: zookeeper
         state: stopped
         enabled: no
       ignore_errors: yes
 
-    - name: Rimuovi systemd services
+    - name: Rimuovi unit systemd
       file:
         path: "{{ item }}"
         state: absent
@@ -30,42 +30,63 @@
       systemd:
         daemon_reload: yes
 
-    - name: Rimuovi directory installazioni
+    - name: Rimuovi wrapper scripts in /usr/local/bin
+      file:
+        path: "/usr/local/bin/{{ item }}"
+        state: absent
+      loop:
+        - kafka-topics
+        - kafka-console-producer
+        - kafka-console-consumer
+        - kafka-broker-api-versions
+        - kafka-consumer-groups
+        - kafka-configs
+        - kafka-acls
+        - kafka-log-dirs
+        - kafka-reassign-partitions
+        - kafka-leader-election
+        - kafka-storage
+        - kafka-metadata-quorum
+        - kafka-features
+        - kafka-dump-log
+        - kafka-metadata-shell
+        - kafka-run
+
+    - name: Rimuovi directory di installazione e dati (preservando la mount /opt)
       file:
         path: "{{ item }}"
         state: absent
       loop:
-        - /opt/kafka
-        - /opt/zookeeper
+        - "{{ kafka_home }}"
+        - "{{ java_home }}"
         - /opt/jdk17
+        - /opt/zookeeper
         - /var/lib/kafka-logs
         - /var/lib/zookeeper
         - /etc/profile.d/java.sh
 
-    - name: Rimuovi archivi temporanei
+    - name: Rimuovi archivi temporanei scaricati in /tmp
       file:
         path: "{{ item }}"
         state: absent
       loop:
-        - /tmp/kafka_2.13-3.9.1.tgz
-        - /tmp/apache-zookeeper-3.9.4.tar.gz
-        - /tmp/apache-zookeeper-3.9.4-bin.tar.gz
-        - /tmp/zulu17.60.17-ca-jdk17.0.16-linux_x64.tar.gz
+        - "/tmp/{{ kafka_archive }}"
+        - "/tmp/{{ java_archive }}"
 
-    - name: Rimuovi utente kafka
+    - name: Rimuovi utente {{ kafka_user }}
       user:
-        name: kafka
+        name: "{{ kafka_user }}"
         state: absent
-        remove: yes
+        remove: no
       ignore_errors: yes
 
-    - name: Rimuovi utente zookeeper
+    - name: Rimuovi eventuale utente zookeeper legacy
       user:
         name: zookeeper
         state: absent
-        remove: yes
+        remove: no
       ignore_errors: yes
 
     - name: Mostra messaggio di completamento
       debug:
-        msg: "Cleanup completato su {{ inventory_hostname }}"
+        msg: "Cleanup completato su {{ inventory_hostname }} ({{ ansible_host }})"

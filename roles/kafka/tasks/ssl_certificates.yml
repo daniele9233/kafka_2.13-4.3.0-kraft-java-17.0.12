@@ -1,164 +1,186 @@
 ---
-- name: Rimuovi vecchi certificati
-  file:
-    path: "{{ kafka_home }}/config/certs"
-    state: absent
+# ==============================================================================
+# CERTIFICATI TLS: CA interna, Truststore condiviso e Keystore JKS per nodo
+# Riferimento: Sez. 4 di Guida_Kafka_KRaft_3_Nodi_SASL_SSL_v3.pdf
+# ==============================================================================
 
-- name: Ricrea directory certificati
+- name: Crea directory sicurezza {{ kafka_security_dir }} su tutti i nodi
   file:
-    path: "{{ kafka_home }}/config/certs"
+    path: "{{ kafka_security_dir }}"
     state: directory
-    owner: kafka
-    group: kafka
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0750'
+
+- name: Crea directory temporanea sul controller Ansible per distribuzione certificati
+  file:
+    path: "{{ ssl_controller_tmp_dir }}"
+    state: directory
     mode: '0700'
+  delegate_to: localhost
+  become: no
+  run_once: true
 
-- name: Genera CA privata (solo sul primo nodo)
+# ------------------------------------------------------------------------------
+# 4.1 Crea la CA (Certificate Authority) sul primo nodo (kafka-1)
+# ------------------------------------------------------------------------------
+- name: Genera la CA interna (ca.key e ca.crt) sul primo nodo
   shell: |
-    openssl req -new -x509 -keyout ca-key -out ca-cert -days 3650 \
-      -subj "/C=IT/ST=Italy/L=Rome/O=Company/CN=KafkaCA" \
-      -passout pass:{{ ssl_keystore_password }}
+    openssl req -new -newkey rsa:{{ ssl_ca_key_size }} -days {{ ssl_validity_days }} -x509 \
+      -subj "/CN={{ ssl_ca_cn }}" \
+      -keyout ca.key -out ca.crt -nodes
+    chmod 600 ca.key
+    chmod 644 ca.crt
   args:
-    chdir: "{{ kafka_home }}/config/certs"
-    creates: "{{ kafka_home }}/config/certs/ca-cert"
+    chdir: "{{ kafka_security_dir }}"
+    creates: "{{ kafka_security_dir }}/ca.crt"
   when: inventory_hostname == groups['kafka_cluster'][0]
   run_once: true
 
-- name: Fetch CA cert dal primo nodo
+# ------------------------------------------------------------------------------
+# 4.2 Crea il Truststore (uguale per tutti i nodi) sul primo nodo
+# ------------------------------------------------------------------------------
+- name: Crea il Truststore condiviso ({{ ssl_truststore_filename }}) sul primo nodo
+  shell: |
+    {{ java_home }}/bin/keytool -keystore {{ ssl_truststore_filename }} -alias {{ ssl_ca_alias }} \
+      -import -file ca.crt -storepass '{{ ssl_truststore_password }}' -noprompt
+  args:
+    chdir: "{{ kafka_security_dir }}"
+    creates: "{{ kafka_security_dir }}/{{ ssl_truststore_filename }}"
+  when: inventory_hostname == groups['kafka_cluster'][0]
+  run_once: true
+
+# ------------------------------------------------------------------------------
+# 4.3 Genera i Keystore per tutti e 3 i Nodi sul primo nodo
+# ------------------------------------------------------------------------------
+- name: Genera e firma il Keystore per ciascun nodo del cluster sul primo nodo
+  shell: |
+    set -e
+    IP="{{ hostvars[item]['ansible_host'] }}"
+    HOST="{{ item }}"
+    KS="kafka-${IP}.keystore.jks"
+
+    # 1. Genera keystore e chiave privata
+    {{ java_home }}/bin/keytool -genkey -keystore "${KS}" -alias {{ ssl_keystore_alias }} \
+      -validity {{ ssl_validity_days }} -keyalg RSA -keysize {{ ssl_keystore_key_size }} \
+      -storepass '{{ ssl_keystore_password }}' -keypass '{{ ssl_key_password }}' \
+      -dname "CN=${IP}" -ext "SAN=IP:${IP},DNS:${HOST},DNS:localhost,IP:127.0.0.1"
+
+    # 2. Crea richiesta di firma (CSR)
+    {{ java_home }}/bin/keytool -keystore "${KS}" -alias {{ ssl_keystore_alias }} \
+      -certreq -file "cert-file-${IP}" -storepass '{{ ssl_keystore_password }}'
+
+    # 3. Firma il certificato con la CA includendo SAN=IP:<ip>
+    printf "subjectAltName=IP:%s,DNS:%s,DNS:localhost,IP:127.0.0.1\n" "${IP}" "${HOST}" > "ext-${IP}.cnf"
+    openssl x509 -req -CA ca.crt -CAkey ca.key -in "cert-file-${IP}" \
+      -out "cert-signed-${IP}" -days {{ ssl_validity_days }} -CAcreateserial \
+      -extfile "ext-${IP}.cnf"
+
+    # 4. Importa CA nel keystore
+    {{ java_home }}/bin/keytool -keystore "${KS}" -alias {{ ssl_ca_alias }} \
+      -import -file ca.crt -storepass '{{ ssl_keystore_password }}' -noprompt
+
+    # 5. Importa certificato firmato nel keystore
+    {{ java_home }}/bin/keytool -keystore "${KS}" -alias {{ ssl_keystore_alias }} \
+      -import -file "cert-signed-${IP}" -storepass '{{ ssl_keystore_password }}' -noprompt
+
+    # Pulisci file CSR/temporanei
+    rm -f "cert-file-${IP}" "cert-signed-${IP}" "ext-${IP}.cnf"
+  args:
+    chdir: "{{ kafka_security_dir }}"
+    creates: "{{ kafka_security_dir }}/kafka-{{ hostvars[item]['ansible_host'] }}.keystore.jks"
+  loop: "{{ groups['kafka_cluster'] }}"
+  when: inventory_hostname == groups['kafka_cluster'][0]
+  run_once: true
+
+# ------------------------------------------------------------------------------
+# 4.4 Distribuzione di Keystore e Truststore agli altri nodi
+# ------------------------------------------------------------------------------
+- name: Preleva Truststore e CA cert dal primo nodo verso il controller Ansible
   fetch:
-    src: "{{ kafka_home }}/config/certs/ca-cert"
-    dest: "/tmp/kafka-ca-cert"
+    src: "{{ kafka_security_dir }}/{{ item }}"
+    dest: "{{ ssl_controller_tmp_dir }}/{{ item }}"
     flat: yes
+  loop:
+    - "{{ ssl_truststore_filename }}"
+    - "ca.crt"
   when: inventory_hostname == groups['kafka_cluster'][0]
   run_once: true
 
-- name: Fetch CA key dal primo nodo
+- name: Preleva i Keystore di tutti i nodi dal primo nodo verso il controller Ansible
   fetch:
-    src: "{{ kafka_home }}/config/certs/ca-key"
-    dest: "/tmp/kafka-ca-key"
+    src: "{{ kafka_security_dir }}/kafka-{{ hostvars[item]['ansible_host'] }}.keystore.jks"
+    dest: "{{ ssl_controller_tmp_dir }}/kafka-{{ hostvars[item]['ansible_host'] }}.keystore.jks"
     flat: yes
+  loop: "{{ groups['kafka_cluster'] }}"
   when: inventory_hostname == groups['kafka_cluster'][0]
   run_once: true
 
-- name: Copia CA cert agli altri nodi
+- name: Copia il Truststore condiviso e ca.crt sugli altri nodi
   copy:
-    src: "/tmp/kafka-ca-cert"
-    dest: "{{ kafka_home }}/config/certs/ca-cert"
-    owner: kafka
-    group: kafka
-    mode: '0644'
+    src: "{{ ssl_controller_tmp_dir }}/{{ item }}"
+    dest: "{{ kafka_security_dir }}/{{ item }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
+  loop:
+    - "{{ ssl_truststore_filename }}"
+    - "ca.crt"
   when: inventory_hostname != groups['kafka_cluster'][0]
 
-- name: Copia CA key agli altri nodi
+- name: Copia il Keystore specifico del nodo ({{ ssl_keystore_filename }}) sugli altri nodi
   copy:
-    src: "/tmp/kafka-ca-key"
-    dest: "{{ kafka_home }}/config/certs/ca-key"
-    owner: kafka
-    group: kafka
+    src: "{{ ssl_controller_tmp_dir }}/{{ ssl_keystore_filename }}"
+    dest: "{{ ssl_keystore_location }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
     mode: '0600'
   when: inventory_hostname != groups['kafka_cluster'][0]
 
-- name: Crea file di estensioni SAN per ogni broker
-  copy:
-    content: |
-      [req]
-      distinguished_name = req_distinguished_name
-      x509_extensions = v3_req
-      prompt = no
-      
-      [req_distinguished_name]
-      C = IT
-      ST = Italy
-      L = Rome
-      O = Company
-      CN = {{ ansible_hostname }}
-      
-      [v3_req]
-      keyUsage = critical, digitalSignature, keyEncipherment, keyAgreement
-      extendedKeyUsage = serverAuth, clientAuth
-      subjectAltName = @alt_names
-      
-      [alt_names]
-      DNS.1 = {{ ansible_hostname }}
-      DNS.2 = {{ ansible_fqdn }}
-      DNS.3 = localhost
-      IP.1 = {{ ansible_host }}
-      IP.2 = 127.0.0.1
-    dest: "{{ kafka_home }}/config/certs/cert-ext.cnf"
-    owner: kafka
-    group: kafka
-    mode: '0644'
-
-- name: Genera keystore per ogni broker
-  shell: |
-    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias localhost -validity 3650 \
-      -genkey -keyalg RSA -keysize 2048 \
-      -dname "CN={{ ansible_hostname }},OU=IT,O=Company,L=Rome,ST=Italy,C=IT" \
-      -ext "SAN=DNS:{{ ansible_hostname }},DNS:{{ ansible_fqdn }},DNS:localhost,IP:{{ ansible_host }},IP:127.0.0.1" \
-      -storepass {{ ssl_keystore_password }} -keypass {{ ssl_key_password }}
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
-    creates: "{{ kafka_home }}/config/certs/kafka.server.keystore.jks"
-
-- name: Crea truststore e importa CA
-  shell: |
-    {{ java_home }}/bin/keytool -keystore kafka.server.truststore.jks -alias CARoot -import -file ca-cert \
-      -storepass {{ ssl_truststore_password }} -noprompt
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
-    creates: "{{ kafka_home }}/config/certs/kafka.server.truststore.jks"
-
-- name: Esporta certificato dal keystore
-  shell: |
-    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias localhost -certreq -file cert-file \
-      -storepass {{ ssl_keystore_password }} \
-      -ext "SAN=DNS:{{ ansible_hostname }},DNS:{{ ansible_fqdn }},DNS:localhost,IP:{{ ansible_host }},IP:127.0.0.1"
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
-    creates: "{{ kafka_home }}/config/certs/cert-file"
-
-- name: Firma il certificato con la CA includendo SAN
-  shell: |
-    openssl x509 -req -CA ca-cert -CAkey ca-key -in cert-file -out cert-signed \
-      -days 3650 -CAcreateserial -passin pass:{{ ssl_keystore_password }} \
-      -extfile cert-ext.cnf -extensions v3_req
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
-    creates: "{{ kafka_home }}/config/certs/cert-signed"
-
-- name: Importa CA nel keystore
-  shell: |
-    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias CARoot -import -file ca-cert \
-      -storepass {{ ssl_keystore_password }} -noprompt
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
-  ignore_errors: yes
-
-- name: Importa certificato firmato nel keystore
-  shell: |
-    {{ java_home }}/bin/keytool -keystore kafka.server.keystore.jks -alias localhost -import -file cert-signed \
-      -storepass {{ ssl_keystore_password }} -noprompt
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
-  ignore_errors: yes
-
-- name: Imposta permessi sui certificati
+- name: Imposta proprietario e permessi 0600 sui file .jks su tutti i nodi
   file:
-    path: "{{ kafka_home }}/config/certs"
-    owner: kafka
-    group: kafka
-    mode: '0700'
+    path: "{{ item }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
+  loop:
+    - "{{ ssl_keystore_location }}"
+    - "{{ ssl_truststore_location }}"
+
+- name: Imposta permessi 0600 su ca.key sul primo nodo
+  file:
+    path: "{{ kafka_security_dir }}/ca.key"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0600'
+  when: inventory_hostname == groups['kafka_cluster'][0]
+
+- name: Imposta proprietario {{ kafka_user }}:{{ kafka_group }} su {{ kafka_security_dir }}
+  file:
+    path: "{{ kafka_security_dir }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
     recurse: yes
 
-- name: Verifica SAN nei certificati
+- name: Rimuovi directory temporanea certificati dal controller Ansible
+  file:
+    path: "{{ ssl_controller_tmp_dir }}"
+    state: absent
+  delegate_to: localhost
+  become: no
+  run_once: true
+
+- name: Verifica SAN e validità del Keystore sul nodo corrente
   shell: |
-    {{ java_home }}/bin/keytool -list -v -keystore kafka.server.keystore.jks -storepass {{ ssl_keystore_password }} | grep -A 5 "SubjectAlternativeName"
-  args:
-    chdir: "{{ kafka_home }}/config/certs"
+    {{ java_home }}/bin/keytool -list -v -keystore "{{ ssl_keystore_location }}" \
+      -storepass '{{ ssl_keystore_password }}' | grep -A 3 "SubjectAlternativeName"
   register: cert_san_info
   changed_when: false
 
-- name: Mostra SAN nei certificati
+- name: Mostra dettagli SAN del certificato installato
   debug:
-    msg: 
-      - "Certificato per: {{ ansible_hostname }}"
-      - "{{ cert_san_info.stdout_lines }}"
+    msg:
+      - "Nodo: {{ inventory_hostname }} ({{ ansible_host }})"
+      - "Keystore: {{ ssl_keystore_location }}"
+      - "SAN: {{ cert_san_info.stdout_lines }}"

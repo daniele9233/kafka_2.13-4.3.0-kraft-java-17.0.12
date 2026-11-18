@@ -1,10 +1,10 @@
 ---
-- name: Setup Kafka + Zookeeper Cluster con TLS
+- name: Setup Cluster Apache Kafka 4.x KRaft con Sicurezza SASL_SSL (Ubuntu 26)
   hosts: kafka_cluster
   become: yes
-  
+
   tasks:
-    - name: Aggiorna cache APT (ignora errori repository)
+    - name: Aggiorna cache APT su Ubuntu
       apt:
         update_cache: yes
         cache_valid_time: 3600
@@ -14,47 +14,53 @@
       until: apt_update_result is succeeded
       ignore_errors: yes
 
-    - name: Installa dipendenze di sistema
+    - name: Installa pacchetti prerequisiti di sistema
       apt:
-        name:
-          - wget
-          - curl
-          - tar
-          - net-tools
-          - vim
-          - openssl
-          - ca-certificates
+        name: "{{ system_packages }}"
         state: present
         update_cache: no
 
-    - name: Includi ruolo Java
+    - name: Includi ruolo Java (Zulu JDK 17 LTS confinata all'utente {{ kafka_user }})
       include_role:
         name: java
 
-    - name: Includi ruolo Zookeeper
-      include_role:
-        name: zookeeper
-
-    - name: Includi ruolo Kafka
+    - name: Includi ruolo Kafka 4.x (KRaft combined + TLS + SASL/PLAIN + ACL)
       include_role:
         name: kafka
 
-    - name: Verifica stato finale Zookeeper
-      systemd:
-        name: zookeeper
-        state: started
-      register: zk_status
-
-    - name: Verifica stato finale Kafka
+    - name: Verifica stato servizio systemd Kafka
       systemd:
         name: kafka
         state: started
       register: kafka_status
 
-    - name: Mostra riepilogo installazione
+    - name: Verifica stato del quorum KRaft (dal primo nodo)
+      become: yes
+      become_user: "{{ kafka_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+        PATH: "{{ java_home }}/bin:{{ kafka_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+      shell: |
+        BS="{% for host in groups['kafka_cluster'] %}{{ hostvars[host]['ansible_host'] }}:{{ kafka_broker_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+        {{ kafka_home }}/bin/kafka-metadata-quorum.sh --bootstrap-server "$BS" \
+          --command-config "{{ kafka_client_properties }}" describe --status
+      register: kraft_quorum_status
+      changed_when: false
+      when: inventory_hostname == groups['kafka_cluster'][0]
+      run_once: true
+
+    - name: Mostra stato del Quorum KRaft
       debug:
-        msg: 
-          - "Nodo: {{ inventory_hostname }}"
-          - "Broker ID: {{ zookeeper_id }}"
-          - "Zookeeper: {{ zk_status.status.ActiveState }}"
-          - "Kafka: {{ kafka_status.status.ActiveState }}"
+        var: kraft_quorum_status.stdout_lines
+      when: inventory_hostname == groups['kafka_cluster'][0]
+      run_once: true
+
+    - name: Mostra riepilogo installazione per nodo
+      debug:
+        msg:
+          - "Nodo: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "KRaft Node ID: {{ kafka_node_id }} (Ruoli: {{ kafka_process_roles }})"
+          - "Servizio Kafka: {{ kafka_status.status.ActiveState }}"
+          - "Java confinata: {{ java_home }} (in ~/.bashrc e ~/.profile di {{ kafka_user }})"
+          - "Data dir: {{ kafka_data_dir }}"
+          - "Security dir: {{ kafka_security_dir }}"
