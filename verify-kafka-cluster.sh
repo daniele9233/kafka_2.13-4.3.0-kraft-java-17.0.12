@@ -24,10 +24,15 @@ JAVA_HOME="/opt/kafka/jdk17"
 ADMIN_CONFIG="${KAFKA_HOME}/client.properties"
 APP_CONFIG="${KAFKA_HOME}/appclient.properties"
 
+# Legge la password SSL da group_vars/all.yml (fallback a PTVonlinEproD.2026)
+SSL_PASSWORD=$(grep -E '^ssl_keystore_password:' group_vars/all.yml 2>/dev/null | sed -E 's/^ssl_keystore_password:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/')
+SSL_PASSWORD="${SSL_PASSWORD:-PTVonlinEproD.2026}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${BLUE}=====================================================${NC}"
@@ -83,11 +88,52 @@ print_result $? "Quorum KRaft operativo e Leader eletto" || ((ERRORS++))
 echo ""
 
 # ==========================================
-# 4. VERIFICA CERTIFICATI TLS
+# 4. VERIFICA CERTIFICATI TLS (CON PASSWORD, FQDN, SAN E SCADENZA)
 # ==========================================
-echo -e "${YELLOW}4. Verifica certificati TLS (Keystore per nodo e Truststore condiviso)...${NC}"
+echo -e "${YELLOW}4. Verifica certificati TLS (Keystore, Truststore, FQDN, SAN e Scadenza)...${NC}"
 ansible -i "$INVENTORY" kafka_cluster -m shell -a "test -f ${KAFKA_HOME}/config/security/kafka.truststore.jks && ls ${KAFKA_HOME}/config/security/kafka-*.keystore.jks >/dev/null 2>&1" > /dev/null 2>&1
 print_result $? "Keystore e Truststore presenti in ${KAFKA_HOME}/config/security" || ((ERRORS++))
+
+# Verifica apertura Truststore con password e scadenza CA
+TS_INFO=$(ansible -i "$INVENTORY" "$NODE1_HOST" -m shell -a "${JAVA_HOME}/bin/keytool -list -v -keystore ${KAFKA_HOME}/config/security/kafka.truststore.jks -storepass '${SSL_PASSWORD}' -alias CARoot 2>/dev/null | grep -E 'Owner:|Valid from:'" 2>/dev/null | grep -v "SUCCESS")
+if [ -n "$TS_INFO" ]; then
+    print_result 0 "Truststore condiviso (kafka.truststore.jks) verificato con password SSL"
+    echo "$TS_INFO" | sed 's/^/    /'
+else
+    print_result 1 "Errore apertura Truststore (kafka.truststore.jks) con password SSL"
+    ((ERRORS++))
+fi
+
+# Verifica Keystore di ogni nodo con password (FQDN, Subject/CN, SAN, Scadenza)
+for entry in "${NODE1_HOST}:${NODE1_IP}" "${NODE2_HOST}:${NODE2_IP}" "${NODE3_HOST}:${NODE3_IP}"; do
+    HOST="${entry%%:*}"
+    IP="${entry##*:}"
+    KS_PATH="${KAFKA_HOME}/config/security/kafka-${IP}.keystore.jks"
+
+    CERT_DETAILS=$(ansible -i "$INVENTORY" "$HOST" -m shell -a "
+        set -e
+        FQDN=\$(hostname -f 2>/dev/null || hostname)
+        OUT=\$(${JAVA_HOME}/bin/keytool -list -v -keystore '${KS_PATH}' -storepass '${SSL_PASSWORD}' -alias localhost 2>/dev/null)
+        OWNER=\$(echo \"\$OUT\" | grep -m1 'Owner:' | sed 's/^[[:space:]]*//')
+        ISSUER=\$(echo \"\$OUT\" | grep -m1 'Issuer:' | sed 's/^[[:space:]]*//')
+        VALID=\$(echo \"\$OUT\" | grep -m1 'Valid from:' | sed 's/^[[:space:]]*//')
+        SAN=\$(echo \"\$OUT\" | grep -A 2 'SubjectAlternativeName' | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+        echo \"FQDN Host    : \$FQDN (${HOST} - ${IP})\"
+        echo \"Keystore     : ${KS_PATH}\"
+        echo \"Subject (CN) : \$OWNER\"
+        echo \"Emittente CA : \$ISSUER\"
+        echo \"SAN          : \$SAN\"
+        echo \"Scadenza     : \$VALID\"
+    " 2>/dev/null | grep -v "SUCCESS")
+
+    if [ -n "$CERT_DETAILS" ]; then
+        print_result 0 "Certificato Keystore nodo ${HOST} (${IP}) valido e aperto con password SSL:"
+        echo -e "${CYAN}${CERT_DETAILS}${NC}" | sed 's/^/    /'
+    else
+        print_result 1 "Impossibile verificare Keystore su ${HOST} (${KS_PATH}) con password SSL"
+        ((ERRORS++))
+    fi
+done
 
 echo ""
 
@@ -142,6 +188,18 @@ print_result $? "Pulizia topic di test '${TEST_TOPIC}'"
 
 echo ""
 echo -e "${BLUE}=====================================================${NC}"
+echo -e "${YELLOW}Promemoria rapido per collegare le applicazioni client esterne${NC}"
+echo -e "${BLUE}=====================================================${NC}"
+echo "Quando dovrai collegare un'applicazione esterna al cluster:"
+echo ""
+echo "  - Bootstrap servers: ${BOOTSTRAP}"
+echo "  - Truststore da copiare sul client: ${KAFKA_HOME}/config/security/kafka.truststore.jks (presente su tutti i nodi)"
+echo "  - File di configurazione già pronti sui nodi come riferimento:"
+echo "      * Amministrazione (admin): ${ADMIN_CONFIG}"
+echo "      * Applicazioni (appclient): ${APP_CONFIG}"
+echo -e "${BLUE}=====================================================${NC}"
+echo ""
+
 if [ $ERRORS -eq 0 ]; then
     echo -e "${GREEN}✓ TUTTI I TEST SUPERATI! Cluster Kafka 4 KRaft operativo.${NC}"
     exit 0
