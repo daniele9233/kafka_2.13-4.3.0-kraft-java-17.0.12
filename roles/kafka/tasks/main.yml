@@ -274,7 +274,11 @@
 
     {{ kafka_home }}/bin/kafka-acls.sh --bootstrap-server "$BS" $CC --add \
       --allow-principal "User:{{ kafka_app_user }}" --operation Read --operation Write \
-      --topic '__consumer_offsets' --group '*'
+      --topic '__consumer_offsets'
+
+    {{ kafka_home }}/bin/kafka-acls.sh --bootstrap-server "$BS" $CC --add \
+      --allow-principal "User:{{ kafka_app_user }}" --operation Read --operation Describe \
+      --group '*'
 
     {{ kafka_home }}/bin/kafka-acls.sh --bootstrap-server "$BS" $CC --add \
       --allow-principal "User:{{ kafka_app_user }}" --operation Create --operation Describe \
